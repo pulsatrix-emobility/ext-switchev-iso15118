@@ -1,3 +1,4 @@
+# Changes Copyright (c) 2026 pulsatrix gmbh, Apache-2.0 (DEV-3989).
 """
 This module contains the EVCC's States used to process the SECC's incoming
 V2GMessage objects of the ISO 15118-20 protocol, from SessionSetupRes to
@@ -343,7 +344,6 @@ class AuthorizationSetup(StateEVCC):
                 id="id1",
             )
 
-            # TODO: Need a signature for ISO 15118-20, not ISO 15118-2
             pnc_params_tuple = (
                 pnc_params.id,
                 EXI().to_exi(pnc_params, Namespace.ISO_V20_COMMON_MSG),
@@ -356,7 +356,7 @@ class AuthorizationSetup(StateEVCC):
                     KeyEncoding.PEM,
                     os.path.join(get_PKI_PATH(), KeyPasswordPath.CONTRACT_LEAF_KEY_PASSWORD),
                 )
-                signature = create_signature(elements_to_sign, signature_key)
+                signature = create_signature(elements_to_sign, signature_key, iso20=True)
             except PrivateKeyReadError as exc:
                 logger.warning(
                     "PrivateKeyReadError occurred while trying to create "

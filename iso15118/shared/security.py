@@ -1,3 +1,4 @@
+# Changes Copyright (c) 2026 pulsatrix gmbh, Apache-2.0 (DEV-3989).
 import logging
 import os
 import secrets
@@ -22,7 +23,7 @@ from cryptography.hazmat.primitives.asymmetric.utils import (
     encode_dss_signature,
 )
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives.hashes import SHA256, Hash, HashAlgorithm
+from cryptography.hazmat.primitives.hashes import SHA256, SHA512, Hash, HashAlgorithm
 from cryptography.hazmat.primitives.kdf.concatkdf import ConcatKDFHash
 from cryptography.hazmat.primitives.serialization import (
     Encoding,
@@ -81,7 +82,7 @@ from iso15118.shared.messages.xmldsig import (
     Transform,
     Transforms,
 )
-from iso15118.shared.settings import is_tls_1_3_enabled, get_PKI_PATH
+from iso15118.shared.settings import get_PKI_PATH, is_tls_1_3_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -787,7 +788,10 @@ def get_cert_issuer_serial(cert_path: str) -> Tuple[str, int]:
 
 
 def create_signature(
-    elements_to_sign: List[Tuple[str, bytes]], signature_key: EllipticCurvePrivateKey
+    elements_to_sign: List[Tuple[str, bytes]],
+    signature_key: EllipticCurvePrivateKey,
+    *,
+    iso20: bool = False,
 ) -> Signature:
     """
     Creates a Signature element that is placed in the header of a V2GMessage.
@@ -816,22 +820,28 @@ def create_signature(
         A Signature instance, containing the SignedInfo and SignatureValue
         elements that need to be placed in the header of a V2GMessage
 
-    TODO We need to determine between ISO 15118-2 and -20 signatures. Probably
-         need a 'protocol' parameter
+    iso20 selects the P-521 / SHA-512 profile for ISO 15118-20 Authorization.
     """
+    if iso20 and not isinstance(signature_key.curve, ec.SECP521R1):
+        raise ValueError("ISO 15118-20 Authorization requires secp521r1")
+    hash_algorithm = SHA512() if iso20 else SHA256()
+    hash_name = "sha512" if iso20 else "sha256"
+    coordinate_size = 66 if iso20 else 32
     # 1. Step: Reference generation
     reference_list: List[Reference] = []
 
     for id_attr, exi_encoded in elements_to_sign:
+        digest = Hash(hash_algorithm)
+        digest.update(exi_encoded)
         reference = Reference(
             uri="#" + id_attr,
             transforms=Transforms(
                 transform=[Transform(algorithm="http://www.w3.org/TR/canonical-exi/")]
             ),
             digest_method=DigestMethod(
-                algorithm="http://www.w3.org/2001/04/xmlenc#sha256"
+                algorithm=f"http://www.w3.org/2001/04/xmlenc#{hash_name}"
             ),
-            digest_value=create_digest(exi_encoded),
+            digest_value=digest.finalize(),
         )
 
         reference_list.append(reference)
@@ -841,7 +851,7 @@ def create_signature(
             algorithm="http://www.w3.org/TR/canonical-exi/"
         ),
         signature_method=SignatureMethod(
-            algorithm="http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha256"
+            algorithm=f"http://www.w3.org/2001/04/xmldsig-more#ecdsa-{hash_name}"
         ),
         reference=reference_list,
     )
@@ -849,20 +859,22 @@ def create_signature(
     # 2. Step: Signature generation
     exi_encoded_signed_info = EXI().to_exi(signed_info, Namespace.XML_DSIG)
     der_encoded_signature_value = signature_key.sign(
-        data=exi_encoded_signed_info, signature_algorithm=ec.ECDSA(SHA256())
+        data=exi_encoded_signed_info, signature_algorithm=ec.ECDSA(hash_algorithm)
     )
     # The sign method from the cryptography library automatically DER encodes
     # the signature. However, in ISO 15118 DER encoding of the signature
     # is not expected. Thus, in the next lines we extract the r and s points
     # from the DER encoding, which correspond to the coordinates of the signature
     # value on the Elliptic Curve.
-    # Each of these coordinates have a 32 byte length number.
+    # Coordinates occupy 32 bytes for -2, 66 bytes for -20 (P1363).
     # The `decode_dss_signature` returns the r and s points as integer
     # https://cryptography.io/en/latest/hazmat/primitives/asymmetric/utils/#cryptography.hazmat.primitives.asymmetric.utils.decode_dss_signature  # noqa
-    (ec_r, ec_s) = decode_dss_signature(der_encoded_signature_value)
-    # As the signature value is sent as a full 64 bytes raw value, we need
+    ec_r, ec_s = decode_dss_signature(der_encoded_signature_value)
+    # Encode fixed-width unsigned coordinates, without the ASN.1 DER wrapper.
     # to convert each point to bytes in big endian format and concatenate both
-    raw_signature_value = bytearray(ec_r.to_bytes(32, "big") + ec_s.to_bytes(32, "big"))
+    raw_signature_value = bytearray(
+        ec_r.to_bytes(coordinate_size, "big") + ec_s.to_bytes(coordinate_size, "big")
+    )
     signature = Signature(
         signed_info=signed_info,
         signature_value=SignatureValue(value=raw_signature_value),

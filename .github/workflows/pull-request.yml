@@ -4,12 +4,14 @@ on:
   pull_request:
     branches:
       - master
+      - bench-2026.02.1
 
 env:
   PYTHON_VERSION: 3.10.5
 
 jobs:
   code-quality-check:
+    if: github.repository != 'pulsatrix-emobility/ext-switchev-iso15118'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@master
@@ -42,3 +44,18 @@ jobs:
 
     - name: Tests
       run: make test
+
+  bench-signature:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: pip install -r requirements.txt pytest pytest-asyncio
+      # Pinned upstream conftest imports an unavailable EVSessionContext.
+      - run: python -m pytest --confcutdir=tests/iso15118_20 tests/iso15118_20/test_authorization_signature.py -q
