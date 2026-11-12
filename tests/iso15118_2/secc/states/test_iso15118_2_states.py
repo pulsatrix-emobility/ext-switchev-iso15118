@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 pytest.skip(
-    "DEV-3994: SECC -2 state module has duplicate evse_max_current keyword",
+    "DEV-4007: SECC -2 state module has duplicate evse_max_current keyword",
     allow_module_level=True,
 )
 

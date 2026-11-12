@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 pytest.skip(
-    "DEV-3994: SECC shared-settings loader is absent from the pinned fork",
+    "DEV-4007: SECC shared-settings loader is absent from the pinned fork",
     allow_module_level=True,
 )
 

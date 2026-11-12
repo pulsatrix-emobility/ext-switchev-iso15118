@@ -142,12 +142,7 @@ class TestEvseScenarios:
         "expected_state",
         [
             (None, False, None, None),  # Completion and isolation are unknown.
-            (
-                False,
-                True,
-                IsolationLevel.VALID,
-                None,
-            ),  # Isolation is valid, but cable check is not finished.
+            (False, True, IsolationLevel.VALID, None),  # Isolation is valid, but cable check is not finished.
             (True, False, None, None),  # Finished, but isolation is still unknown.
             # Fault aborts an unfinished check.
             (False, False, IsolationLevel.FAULT, Terminate),
@@ -157,12 +152,16 @@ class TestEvseScenarios:
                 IsolationLevel.VALID,
                 PreCharge,
             ),  # noqa Contactor closed. Isolation response received - Valid. Next stage Precharge.
-            (
+            pytest.param(
                 True,
                 True,
                 IsolationLevel.INVALID,
-                None,
-            ),  # Current EVerest behaviour keeps INVALID isolation ongoing.
+                Terminate,
+                marks=pytest.mark.xfail(
+                    strict=True,
+                    reason="DEV-4007: completed INVALID isolation remains ongoing",
+                ),
+            ),
             (
                 True,
                 True,
