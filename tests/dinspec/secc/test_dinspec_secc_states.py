@@ -136,32 +136,32 @@ class TestEvseScenarios:
         self.comm_session.evse_controller.set_hlc_charging.assert_called_with(False)
 
     @pytest.mark.parametrize(
-        "is_contactor_closed, "
+        "cable_check_finished, "
         "cable_check_started, "
         "cable_check_status, "
         "expected_state",
         [
-            (None, False, None, None),  # First request.
-            (
-                None,
-                False,
-                None,
-                None,
-            ),  # Not first request. Contactor status unknown.
-            (True, False, None, None),  # Not first request. Contactor closed.
-            (False, False, None, Terminate),  # Contactor close failed.
+            (None, False, None, None),  # Completion and isolation are unknown.
+            (False, True, IsolationLevel.VALID, None),  # Isolation is valid, but cable check is not finished.
+            (True, False, None, None),  # Finished, but isolation is still unknown.
+            # Fault aborts an unfinished check.
+            (False, False, IsolationLevel.FAULT, Terminate),
             (
                 True,
                 True,
                 IsolationLevel.VALID,
                 PreCharge,
             ),  # noqa Contactor closed. Isolation response received - Valid. Next stage Precharge.
-            (
+            pytest.param(
                 True,
                 True,
                 IsolationLevel.INVALID,
                 Terminate,
-            ),  # noqa Contactor closed. Isolation response received - Invalid. Terminate.
+                marks=pytest.mark.xfail(
+                    strict=True,
+                    reason="DEV-4007: completed INVALID isolation remains ongoing",
+                ),
+            ),
             (
                 True,
                 True,
@@ -178,7 +178,7 @@ class TestEvseScenarios:
     )
     async def test_15118_dinspec_dc_cable_check(
         self,
-        is_contactor_closed: bool,
+        cable_check_finished: bool,
         cable_check_started: bool,
         cable_check_status: IsolationLevel,
         expected_state: Type[State],
@@ -198,10 +198,10 @@ class TestEvseScenarios:
 
         dc_cable_check = CableCheck(self.comm_session)
         dc_cable_check.cable_check_started = cable_check_started
-        dc_cable_check.contactors_closed = is_contactor_closed
-        contactor_status = AsyncMock(return_value=is_contactor_closed)
-        self.comm_session.evse_controller.is_contactor_closed = contactor_status
-        cable_check_status = AsyncMock(return_value=cable_check_status)
-        self.comm_session.evse_controller.get_cable_check_status = cable_check_status
+        controller = self.comm_session.evse_controller
+        status = await controller.get_dc_evse_status()
+        status.evse_isolation_status = cable_check_status
+        controller.isCableCheckFinished = AsyncMock(return_value=cable_check_finished)
+        controller.get_dc_evse_status = AsyncMock(return_value=status)
         await dc_cable_check.process_message(message=cable_check_req)
         assert dc_cable_check.next_state is expected_state

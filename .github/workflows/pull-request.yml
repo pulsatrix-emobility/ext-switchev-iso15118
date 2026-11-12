@@ -45,17 +45,20 @@ jobs:
     - name: Tests
       run: make test
 
-  bench-signature:
+  fork-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - run: pip install -r requirements.txt pytest pytest-asyncio
-      # Pinned upstream conftest imports an unavailable EVSessionContext.
-      - run: python -m pytest --confcutdir=tests/iso15118_20 tests/iso15118_20/test_authorization_signature.py -q
+      - name: Install runtime and declared test dependencies
+        run: |
+          pip install -r requirements.txt 'pytest>=7.1.1,<8' 'pytest-asyncio>=0.18.3,<0.24' \
+            'pytest-cov>=3,<5' 'asynctest>=0.13,<0.14' 'freezegun>=1.2.1,<2' \
+            'aiofile>=3.7.4,<4' 'toml==0.10.2'
+      - run: pytest

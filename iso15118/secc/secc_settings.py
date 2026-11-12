@@ -1,3 +1,4 @@
+# Changes Copyright (c) 2026 pulsatrix gmbh, Apache-2.0 (DEV-3994).
 import logging
 import os
 from dataclasses import dataclass
@@ -6,9 +7,8 @@ from typing import List, Optional, Type
 import environs
 
 from iso15118.secc.controller.interface import EVSEControllerInterface
-from iso15118.secc.controller.interface import EVSessionContext
+from iso15118.secc.controller.ev_data import EVSessionContext
 from iso15118.shared.messages.enums import AuthEnum, Protocol
-from iso15118.shared.settings import load_shared_settings, shared_settings
 from iso15118.shared.utils import load_requested_auth_modes, load_requested_protocols
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,9 @@ class Config:
         Args:
             env_path (str): Absolute path to the location of the .env file
         """
+        # The pinned EVerest fork does not provide this SECC environment loader.
+        from iso15118.shared.settings import load_shared_settings, shared_settings
+
         env = environs.Env(eager=False)
         if not env_path:
             env_path = os.getcwd() + "/.env"
