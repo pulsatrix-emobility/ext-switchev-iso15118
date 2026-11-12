@@ -3,6 +3,9 @@ This module contains the code to retrieve (hardware-related) data from the EVSE
 (Electric Vehicle Supply Equipment).
 """
 
+# Changes Copyright (c) 2026 pulsatrix gmbh, Apache-2.0 (DEV-3994).
+from __future__ import annotations
+
 import base64
 import logging
 import math

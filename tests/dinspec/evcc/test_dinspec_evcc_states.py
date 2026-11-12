@@ -6,7 +6,7 @@ import pytest as pytest
 
 from iso15118.evcc import EVCCConfig
 from iso15118.evcc.comm_session_handler import EVCCCommunicationSession
-from iso15118.evcc.controller.simulator import SimEVController
+from iso15118.evcc.controller.simulator import EVEREST_EV_STATE, SimEVController
 from iso15118.evcc.states.din_spec_states import (
     CableCheck,
     ChargeParameterDiscovery,
@@ -132,7 +132,10 @@ class TestEvScenarios:
         await current_demand.process_message(message=get_current_demand_acheived())
         assert current_demand.next_state is PowerDelivery
 
-    async def test_current_demand_req_to_power_delivery_req_to_welding_detection(self):
+    async def test_current_demand_req_to_power_delivery_req_to_welding_detection(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(EVEREST_EV_STATE, "StopCharging", True)
         current_demand = CurrentDemand(self.comm_session_mock)
         await current_demand.process_message(message=get_current_demand_acheived())
         assert current_demand.next_state is PowerDelivery

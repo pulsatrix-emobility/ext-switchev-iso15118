@@ -5,15 +5,26 @@ import pytest
 from iso15118.evcc import EVCCConfig
 from iso15118.evcc.comm_session_handler import EVCCCommunicationSession
 from iso15118.evcc.controller.simulator import SimEVController
+from iso15118.evcc.everest import context as evcc_context
 from iso15118.secc.comm_session_handler import SECCCommunicationSession
 from iso15118.secc.controller.ev_data import EVSessionContext
 from iso15118.secc.controller.simulator import SimEVSEController
+from iso15118.secc.everest import context as secc_context
 from iso15118.secc.failed_responses import init_failed_responses_iso_v2
 from iso15118.shared.messages.enums import Protocol
 from iso15118.shared.messages.iso15118_2.datatypes import EnergyTransferModeEnum
 from iso15118.shared.notifications import StopNotification
 from tests.iso15118_2.secc.states.test_messages import get_sa_schedule_list
 from tests.tools import MOCK_SESSION_ID
+
+
+@pytest.fixture(autouse=True)
+def everest_simulator_defaults(monkeypatch):
+    for context in (evcc_context, secc_context):
+        monkeypatch.setattr(context, "_pub_callback", lambda *_: None)
+    monkeypatch.setattr(
+        evcc_context.ev_state, "EnergyTransferMode", EnergyTransferModeEnum.DC_EXTENDED.value
+    )
 
 
 @pytest.fixture
