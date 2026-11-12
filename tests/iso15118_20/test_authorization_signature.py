@@ -80,31 +80,17 @@ def test_iso20_authorization_uses_sha512_and_fixed_width_p521():
     reference = signature.signed_info.reference[0]
     assert reference.digest_method.algorithm.endswith("#sha512")
     assert len(reference.digest_value) == 64
+    info = signature.signed_info
+    encoded_info = EXI().to_exi(info, Namespace.XML_DSIG)
     raw = signature.signature_value.value
     assert len(raw) == 132
     key.public_key().verify(
         encode_dss_signature(
             int.from_bytes(raw[:66], "big"), int.from_bytes(raw[66:], "big")
         ),
-        EXI().to_exi(signature.signed_info, Namespace.XML_DSIG),
+        encoded_info,
         ec.ECDSA(hashes.SHA512()),
     )
-
-
-def test_iso20_rejects_a_p256_key():
-    with pytest.raises(ValueError, match="secp521r1"):
-        create_signature(
-            [("id1", b"test fragment")],
-            ec.generate_private_key(ec.SECP256R1()),
-            iso20=True,
-        )
-
-
-def test_encoded_signed_info_preserves_algorithms():
-    encoded, _ = authorization_vector()
-    request = EXI().from_exi(encoded, Namespace.ISO_V20_COMMON_MSG)
-    info = request.header.signature.signed_info
-    encoded_info = EXI().to_exi(info, Namespace.XML_DSIG)
     decoded = json.loads(
         EXI().get_exi_codec().decode(encoded_info, Namespace.XML_DSIG)
     )["SignedInfo"]
@@ -114,6 +100,15 @@ def test_encoded_signed_info_preserves_algorithms():
         == info.reference[0].digest_method.algorithm
     )
     assert len(encoded_info) == 241
+
+
+def test_iso20_rejects_a_p256_key():
+    with pytest.raises(ValueError, match="secp521r1"):
+        create_signature(
+            [("id1", b"test fragment")],
+            ec.generate_private_key(ec.SECP256R1()),
+            iso20=True,
+        )
 
 
 def test_default_iso2_profile_is_unchanged():
