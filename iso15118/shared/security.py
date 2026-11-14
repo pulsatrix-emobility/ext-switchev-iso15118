@@ -784,7 +784,7 @@ def get_cert_issuer_serial(cert_path: str) -> Tuple[str, int]:
     """
     cert = load_cert(cert_path)
     der_cert = load_der_x509_certificate(cert)
-    return der_cert.issuer.__str__(), der_cert.serial_number
+    return der_cert.issuer.rfc4514_string(), der_cert.serial_number
 
 
 def create_signature(
