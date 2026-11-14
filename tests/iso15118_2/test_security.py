@@ -1,12 +1,27 @@
 """Tests for the iso15118 security module."""
 
-import pytest
-from cryptography.x509 import ExtensionNotFound
+import json
+from datetime import datetime, timedelta, timezone
 
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509 import ExtensionNotFound
+from cryptography.x509.oid import NameOID
+
+from iso15118.shared.messages.iso15118_2.datatypes import (
+    RootCertificateIDList as RootIDsV2,
+)
+from iso15118.shared.messages.iso15118_20.common_types import (
+    RootCertificateIDList as RootIDsV20,
+)
+from iso15118.shared.messages.xmldsig import X509IssuerSerial
 from iso15118.shared.security import (
     all_certificates_from_chain,
     certificate_to_pem_string,
     derive_certificate_hash_data,
+    get_cert_issuer_serial,
     get_certificate_hash_data,
 )
 from tests.iso15118_2.sample_certs.load_certs import (
@@ -162,3 +177,42 @@ def test_get_certificate_hash_data_no_root():
     root_cert = None
     hash_data = get_certificate_hash_data(cert_chain, root_cert)
     assert hash_data is None
+
+
+@pytest.mark.parametrize("root_ids_type", [RootIDsV2, RootIDsV20])
+def test_root_certificate_id_serializes_rfc4514_issuer(tmp_path, root_ids_type):
+    key = ec.generate_private_key(ec.SECP256R1())
+    issuer = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "DE"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Test, Lab"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "Test Root"),
+        ]
+    )
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(issuer)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(12345)
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .sign(key, hashes.SHA256())
+    )
+    path = tmp_path / "root.der"
+    path.write_bytes(cert.public_bytes(serialization.Encoding.DER))
+    name, serial = get_cert_issuer_serial(str(path))
+    root_ids = root_ids_type(
+        RootCertificateID=[
+            X509IssuerSerial(x509_issuer_name=name, x509_serial_number=serial)
+        ]
+    )
+    assert json.loads(root_ids.json(by_alias=True)) == {
+        "RootCertificateID": [
+            {
+                "X509IssuerName": r"CN=Test Root,O=Test\, Lab,C=DE",
+                "X509SerialNumber": 12345,
+            }
+        ]
+    }
