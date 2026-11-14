@@ -341,13 +341,6 @@ class ServiceDiscovery(StateEVCC):
                 # Certificate service
                 self.comm_session.service_details_to_request.append(service.service_id)
 
-                # TODO We should actually first ask for the ServiceDetails and
-                #      based on the service parameter list make absolutely sure
-                #      that the certificate installation service is offered,
-                #      as it would make sense (but just to be fail-proof)
-                self.comm_session.selected_services.append(
-                    SelectedService(service_id=ServiceID.CERTIFICATE)
-                )
             if (
                 service.service_category == ServiceCategory.CUSTOM
                 and await self.comm_session.ev_controller.is_sae_j2847_v2g_active() == True
@@ -416,10 +409,18 @@ class ServiceDetail(StateEVCC):
                         SelectedService(service_id=ServiceID.INTERNET, parameter_set_id=4)
                     )
 
-        # If you want to further evaluate the service details, then do so here
-        # TODO Make sure to check the parameter list and add the certificate
-        #      service to the list of selected services here (instead of
-        #      directly in the ServiceDiscovery
+        if (
+            service_detail_res.service_id == ServiceID.CERTIFICATE
+            and service_detail_res.service_parameter_list is not None
+            and await self.comm_session.ev_controller.is_cert_install_needed()
+            and any(
+                parameter_set.parameter_set_id == 1
+                for parameter_set in service_detail_res.service_parameter_list.parameter_set
+            )
+        ):
+            self.comm_session.selected_services.append(
+                SelectedService(service_id=ServiceID.CERTIFICATE, parameter_set_id=1)
+            )
 
         if len(self.comm_session.service_details_to_request) == 0:
             payment_service_selection_req = PaymentServiceSelectionReq(
@@ -476,7 +477,11 @@ class PaymentServiceSelection(StateEVCC):
             self.comm_session.selected_auth_option
             and self.comm_session.selected_auth_option == AuthEnum.PNC_V2
         ):
-            if await self.comm_session.ev_controller.is_cert_install_needed():
+            if await self.comm_session.ev_controller.is_cert_install_needed() and any(
+                service.service_id == ServiceID.CERTIFICATE
+                and service.parameter_set_id == 1
+                for service in self.comm_session.selected_services
+            ):
                 # TODO: Find a more generic way to serach for all available
                 #       V2GRootCA certificates
                 issuer, serial = get_cert_issuer_serial(os.path.join(get_PKI_PATH(), CertPath.V2G_ROOT_DER))
