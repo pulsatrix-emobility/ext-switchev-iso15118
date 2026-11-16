@@ -8,6 +8,7 @@ import logging
 import random
 import secrets
 import tempfile
+from datetime import datetime, timedelta
 from cryptography.hazmat.primitives.asymmetric import ec
 from typing import List, Optional, Tuple, Union
 import os
@@ -568,6 +569,24 @@ class SimEVController(EVControllerInterface):
             return True
         else:
             return False
+
+    async def is_cert_update_needed(self) -> bool:
+        """Renew within 24 h: simulator policy, not an ISO-mandated threshold."""
+        if await self.is_cert_install_needed():
+            return False
+        try:
+            cert = load_der_x509_certificate(
+                (Path(get_PKI_PATH()) / CertPath.CONTRACT_LEAF_DER).read_bytes()
+            )
+        except (OSError, ValueError):
+            return False
+        now = datetime.utcnow()
+        return (
+            cert.not_valid_before
+            <= now
+            < cert.not_valid_after
+            <= now + timedelta(hours=24)
+        )
 
     async def is_internet_service_needed(self) -> bool:
         return EVEREST_EV_STATE.internet_service_needed

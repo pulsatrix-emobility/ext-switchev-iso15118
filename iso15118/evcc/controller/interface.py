@@ -286,6 +286,10 @@ class EVControllerInterface(ABC):
         """
         raise NotImplementedError
 
+    async def is_cert_update_needed(self) -> bool:
+        """Whether to renew an installed contract via ISO 15118-2."""
+        return False
+
     @abstractmethod
     async def process_sa_schedules_dinspec(
         self, sa_schedules: List[SAScheduleTupleEntryDINSPEC]

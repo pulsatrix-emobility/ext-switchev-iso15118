@@ -890,6 +890,7 @@ def verify_signature(
     sub_ca_certs: List[bytes] = None,
     root_ca_cert: bytes = None,
     iso20: bool = False,
+    strict_cps: bool = False,
 ) -> bool:
     """
     Verifies the signature contained in the Signature element of the V2GMessage
@@ -938,19 +939,22 @@ def verify_signature(
     width = 66 if iso20 else 32
     if signature is None:
         return False
-    if iso20:
+    if iso20 or strict_cps:
+        hash_name = "sha512" if iso20 else "sha256"
         canonical = "http://www.w3.org/TR/canonical-exi/"
         info = signature.signed_info
         expected = ["#" + identifier for identifier, _ in elements_to_sign]
         if (
             not expected
             or len(set(expected)) != len(expected)
-            or [r.uri for r in info.reference] != expected
+            or len(info.reference) != len(expected)
+            or {r.uri for r in info.reference} != set(expected)
             or info.canonicalization_method.algorithm != canonical
             or info.signature_method.algorithm
-            != "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha512"
+            != f"http://www.w3.org/2001/04/xmldsig-more#ecdsa-{hash_name}"
             or any(
-                r.digest_method.algorithm != "http://www.w3.org/2001/04/xmlenc#sha512"
+                r.digest_method.algorithm
+                != f"http://www.w3.org/2001/04/xmlenc#{hash_name}"
                 or [t.algorithm for t in r.transforms.transform] != [canonical]
                 for r in info.reference
             )
@@ -958,8 +962,77 @@ def verify_signature(
         ):
             return False
         try:
-            verify_cps_chain_iso20(leaf_cert, sub_ca_certs, root_ca_cert)
-        except (ValueError, TypeError, InvalidSignature, ExtensionNotFound):
+            if iso20:
+                verify_cps_chain_iso20(leaf_cert, sub_ca_certs, root_ca_cert)
+            else:
+                if not root_ca_cert or not sub_ca_certs or len(sub_ca_certs) > 2:
+                    return False
+                certs = [
+                    load_der_x509_certificate(c)
+                    for c in [leaf_cert, *sub_ca_certs, root_ca_cert]
+                ]
+                if [
+                    d.value
+                    for d in certs[0].subject.get_attributes_for_oid(
+                        NameOID.DOMAIN_COMPONENT
+                    )
+                ] != ["CPS"]:
+                    return False
+                certs[1:-1] = sorted(
+                    certs[1:-1],
+                    key=lambda c: c.extensions.get_extension_for_class(
+                        extensions.BasicConstraints
+                    ).value.path_length,
+                )
+                recognized = {
+                    ExtensionOID.BASIC_CONSTRAINTS,
+                    ExtensionOID.KEY_USAGE,
+                    ExtensionOID.SUBJECT_KEY_IDENTIFIER,
+                    ExtensionOID.AUTHORITY_KEY_IDENTIFIER,
+                }
+                check_validity(certs)
+                for index, cert in enumerate(certs):
+                    public = cert.public_key()
+                    usage = cert.extensions.get_extension_for_class(
+                        extensions.KeyUsage
+                    ).value
+                    constraints = cert.extensions.get_extension_for_class(
+                        extensions.BasicConstraints
+                    ).value
+                    if (
+                        not isinstance(public, EllipticCurvePublicKey)
+                        or not isinstance(public.curve, ec.SECP256R1)
+                        or cert.signature_hash_algorithm.name != "sha256"
+                        or constraints.ca != (index > 0)
+                        or usage.key_cert_sign != (index > 0)
+                        or (index == 0 and not usage.digital_signature)
+                        or any(
+                            e.critical and e.oid not in recognized
+                            for e in cert.extensions
+                        )
+                    ):
+                        return False
+                # Validate each ordered issuer link, including its key identifier.
+                for cert, issuer in zip(certs, certs[1:]):
+                    aki = cert.extensions.get_extension_for_class(
+                        extensions.AuthorityKeyIdentifier
+                    ).value.key_identifier
+                    ski = issuer.extensions.get_extension_for_class(
+                        extensions.SubjectKeyIdentifier
+                    ).value.digest
+                    if cert.issuer != issuer.subject or aki != ski:
+                        return False
+                    issuer.public_key().verify(
+                        cert.signature, cert.tbs_certificate_bytes, ec.ECDSA(SHA256())
+                    )
+        except (
+            ValueError,
+            TypeError,
+            InvalidSignature,
+            ExtensionNotFound,
+            CertExpiredError,
+            CertNotYetValidError,
+        ):
             return False
 
     # 1. Step: Digest value check for each reference element
@@ -1030,7 +1103,7 @@ def verify_signature(
             # TODO Add support for ISO 15118-20 public key types
             raise KeyTypeError(f"Unexpected public key type " f"{type(pub_key)}")
     except InvalidSignature as e:
-        if iso20:
+        if iso20 or strict_cps:
             return False
         pub_key_bytes = pub_key.public_bytes(
             encoding=Encoding.X962, format=PublicFormat.UncompressedPoint

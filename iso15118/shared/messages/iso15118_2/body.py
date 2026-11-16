@@ -179,7 +179,7 @@ class CertificateUpdateReq(BodyBase):
     contract_cert_chain: CertificateChain = Field(
         ..., alias="ContractSignatureCertChain"
     )
-    emaid: EMAID = Field(..., alias="eMAID")
+    emaid: eMAID = Field(..., alias="eMAID")
     list_of_root_cert_ids: RootCertificateIDList = Field(
         ..., alias="ListOfRootCertificateIDs"
     )
