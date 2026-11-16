@@ -47,11 +47,18 @@ jobs:
 
   fork-tests:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - python-version: '3.11'
+            tests: tests/iso15118_2/evcc/states/test_certificate_update.py tests/iso15118_20/test_certificate_installation.py
+          - python-version: '3.12'
+            tests: tests
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python-version }}
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -61,4 +68,4 @@ jobs:
           pip install -r requirements.txt 'pytest>=7.1.1,<8' 'pytest-asyncio>=0.18.3,<0.24' \
             'pytest-cov>=3,<5' 'asynctest>=0.13,<0.14' 'freezegun>=1.2.1,<2' \
             'aiofile>=3.7.4,<4' 'toml==0.10.2'
-      - run: pytest
+      - run: pytest ${{ matrix.tests }}

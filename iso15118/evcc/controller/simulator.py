@@ -576,7 +576,7 @@ class SimEVController(EVControllerInterface):
             return False
         try:
             cert = load_der_x509_certificate(
-                (Path(get_PKI_PATH()) / CertPath.CONTRACT_LEAF_DER).read_bytes()
+                (Path(get_PKI_PATH()) / CertPath.CONTRACT_LEAF_DER.value).read_bytes()
             )
         except (OSError, ValueError):
             return False
@@ -765,7 +765,7 @@ class SimEVController(EVControllerInterface):
         staged = []
         try:
             for path, content in files.items():
-                target = Path(get_PKI_PATH()) / path
+                target = Path(get_PKI_PATH()) / path.value
                 with tempfile.NamedTemporaryFile(
                     dir=target.parent, delete=False
                 ) as output:
@@ -774,7 +774,7 @@ class SimEVController(EVControllerInterface):
             for temporary, target in staged:
                 os.replace(temporary, target)
             if 1 not in seen:
-                (Path(get_PKI_PATH()) / CertPath.MO_SUB_CA1_DER).unlink(missing_ok=True)
+                (Path(get_PKI_PATH()) / CertPath.MO_SUB_CA1_DER.value).unlink(missing_ok=True)
         finally:
             for temporary, _ in staged:
                 Path(temporary).unlink(missing_ok=True)
