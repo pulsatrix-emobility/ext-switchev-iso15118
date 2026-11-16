@@ -48,6 +48,8 @@ from iso15118.shared.messages.iso15118_20.common_messages import (
     ChargingSession as ChargingSessionV20,
 )
 from iso15118.shared.messages.iso15118_20.common_messages import (
+    AuthorizationSetupRes,
+    CertificateInstallationReq,
     ScheduleExchangeReq,
     ScheduleExchangeRes,
 )
@@ -151,6 +153,8 @@ class EVCCCommunicationSession(V2GCommunicationSession):
         # "Caching" authorization_req. (Required in ISO15118-20)
         # Avoids recomputing the signature, eim, pnc params during authorization loop.
         self.authorization_req_message: Optional[AuthorizationReq] = None
+        self.authorization_setup_response: Optional[AuthorizationSetupRes] = None
+        self.certificate_installation_request: Optional[CertificateInstallationReq] = None
         # The energy mode the EVCC selected (ISO 15118-2)
         self.selected_energy_mode: Optional[EnergyTransferModeEnum] = None
         self.is_tls = False

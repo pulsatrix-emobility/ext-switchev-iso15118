@@ -6,6 +6,9 @@ EVControllerInterface.
 from iso15118.evcc.everest import context as EVEREST_CONTEXT, float2Value_Multiplier
 import logging
 import random
+import secrets
+import tempfile
+from cryptography.hazmat.primitives.asymmetric import ec
 from typing import List, Optional, Tuple, Union
 import os
 from pathlib import Path
@@ -89,6 +92,7 @@ from iso15118.shared.messages.iso15118_20.common_messages import (
 )
 from iso15118.shared.messages.iso15118_20.common_messages import (
     DynamicEVPowerProfile,
+    ContractCertificateChain,
     DynamicScheduleExchangeReqParams,
     DynamicScheduleExchangeResParams,
     EMAIDList,
@@ -128,7 +132,6 @@ from iso15118.shared.security import (
     KeyEncoding,
     KeyPasswordPath,
     KeyPath,
-    to_ec_priv_key,
 )
 
 from iso15118.evcc.states.power_curve import (
@@ -692,39 +695,70 @@ class SimEVController(EVControllerInterface):
         EVEREST_EV_STATE.reset()
 
     async def store_contract_cert_and_priv_key(
-        self, contract_cert_chain: CertificateChain, priv_key: bytes
+        self,
+        contract_cert_chain: Union[CertificateChain, ContractCertificateChain],
+        priv_key: bytes,
     ):
         """Overrides EVControllerInterface.store_contract_cert_and_priv_key()."""
 
-        priv_key_pwd = "123456"
-        ec_priv_key = to_ec_priv_key(priv_key)
+        # Validate the complete replacement before touching the installed credential.
+        leaf = load_der_x509_certificate(contract_cert_chain.certificate)
+        public = leaf.public_key()
+        if not isinstance(
+            public, ec.EllipticCurvePublicKey
+        ) or public.curve.name not in (
+            "secp256r1",
+            "secp521r1",
+        ):
+            raise ValueError("Unsupported contract curve")
+        ec_priv_key = ec.derive_private_key(
+            int.from_bytes(priv_key, "big"), public.curve
+        )
+        if ec_priv_key.public_key().public_numbers() != public.public_numbers():
+            raise ValueError("Contract certificate/key mismatch")
+        priv_key_pwd = secrets.token_urlsafe(24)
         serialized_priv_key = ec_priv_key.private_bytes(
             encoding=Encoding.PEM,
             format=PrivateFormat.PKCS8,
             encryption_algorithm=BestAvailableEncryption(
-                priv_key_pwd.encode(encoding="utf-8"))
+                priv_key_pwd.encode(encoding="utf-8")
+            ),
         )
-        with open(os.path.join(get_PKI_PATH(), KeyPath.CONTRACT_LEAF_PEM), 'wb') as f:
-            f.write(serialized_priv_key)
-        with open(os.path.join(get_PKI_PATH(), KeyPasswordPath.CONTRACT_LEAF_KEY_PASSWORD), 'wb') as f:
-            f.write(priv_key_pwd.encode(encoding="utf-8"))
-        with open(os.path.join(get_PKI_PATH(), CertPath.CONTRACT_LEAF_DER), 'wb') as f:
-            f.write(contract_cert_chain.certificate)
-
+        files = {
+            KeyPath.CONTRACT_LEAF_PEM: serialized_priv_key,
+            KeyPasswordPath.CONTRACT_LEAF_KEY_PASSWORD: priv_key_pwd.encode("utf-8"),
+            CertPath.CONTRACT_LEAF_DER: contract_cert_chain.certificate,
+        }
+        seen = set()
         for sub_ca_cert in contract_cert_chain.sub_certificates.certificates:
             cert = load_der_x509_certificate(sub_ca_cert)
-            path_len = cert.extensions.get_extension_for_oid(
+            constraints = cert.extensions.get_extension_for_oid(
                 ExtensionOID.BASIC_CONSTRAINTS
-            ).value.path_length
-            if path_len == 0:
-                with open(os.path.join(get_PKI_PATH(), CertPath.MO_SUB_CA2_DER), 'wb') as f:
-                    f.write(sub_ca_cert)
-            elif path_len == 1:
-                with open(os.path.join(get_PKI_PATH(), CertPath.MO_SUB_CA1_DER), 'wb') as f:
-                    f.write(sub_ca_cert)
-            else:
-                raise CertChainLengthError(
-                    allowed_num_sub_cas=2, num_sub_cas=path_len)
+            ).value
+            path_len = constraints.path_length
+            if not constraints.ca or path_len not in (0, 1) or path_len in seen:
+                raise ValueError("Invalid contract intermediate chain")
+            seen.add(path_len)
+            path = CertPath.MO_SUB_CA2_DER if path_len == 0 else CertPath.MO_SUB_CA1_DER
+            files[path] = sub_ca_cert
+        if 0 not in seen:
+            raise ValueError("Missing contract intermediate")
+        staged = []
+        try:
+            for path, content in files.items():
+                target = Path(get_PKI_PATH()) / path
+                with tempfile.NamedTemporaryFile(
+                    dir=target.parent, delete=False
+                ) as output:
+                    staged.append((output.name, target))
+                    output.write(content)
+            for temporary, target in staged:
+                os.replace(temporary, target)
+            if 1 not in seen:
+                (Path(get_PKI_PATH()) / CertPath.MO_SUB_CA1_DER).unlink(missing_ok=True)
+        finally:
+            for temporary, _ in staged:
+                Path(temporary).unlink(missing_ok=True)
 
     async def get_prioritised_emaids(self) -> Optional[EMAIDList]:
         return None

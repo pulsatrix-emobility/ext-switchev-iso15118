@@ -48,6 +48,7 @@ from iso15118.shared.messages.iso15118_20.common_messages import (
     ChargeProgress as ChargeProgressV20,
 )
 from iso15118.shared.messages.iso15118_20.common_messages import (
+    ContractCertificateChain,
     DynamicScheduleExchangeReqParams,
     DynamicScheduleExchangeResParams,
     EMAIDList,
@@ -354,7 +355,9 @@ class EVControllerInterface(ABC):
 
     @abstractmethod
     async def store_contract_cert_and_priv_key(
-        self, contract_cert_chain: CertificateChain, priv_key: bytes
+        self,
+        contract_cert_chain: Union[CertificateChain, ContractCertificateChain],
+        priv_key: bytes,
     ):
         """
         Stores the contract certificate and associated private key, both needed
