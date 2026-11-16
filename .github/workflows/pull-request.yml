@@ -51,7 +51,7 @@ jobs:
       matrix:
         include:
           - python-version: '3.11'
-            tests: tests/iso15118_2/evcc/states/test_certificate_update.py tests/iso15118_20/test_certificate_installation.py
+            tests: tests/shared/test_certificate_update_fragment.py tests/iso15118_2/evcc/states/test_certificate_update.py tests/iso15118_20/test_certificate_installation.py
           - python-version: '3.12'
             tests: tests
     steps:
