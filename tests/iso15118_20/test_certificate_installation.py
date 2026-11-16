@@ -150,7 +150,7 @@ def material(tmp_path, monkeypatch):
         ),
     }
     for relative, content in files.items():
-        target = tmp_path / relative
+        target = tmp_path / relative.value
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
     for folder in ("client/mo", "ca/mo"):
@@ -396,9 +396,9 @@ async def test_install_stores_p521_and_authorizes_with_new_key(material):
     matches = auth.pnc_params.contract_cert_chain.certificate == der(material.mo[3])
     assert matches
     private = load_priv_key(
-        str(material.path / KeyPath.CONTRACT_LEAF_PEM),
+        str(material.path / KeyPath.CONTRACT_LEAF_PEM.value),
         KeyEncoding.PEM,
-        str(material.path / KeyPasswordPath.CONTRACT_LEAF_KEY_PASSWORD),
+        str(material.path / KeyPasswordPath.CONTRACT_LEAF_KEY_PASSWORD.value),
     )
     assert private.curve.name == "secp521r1"
     matches = private.private_numbers() == material.mo_keys[3].private_numbers()
@@ -411,7 +411,7 @@ async def test_install_stores_p521_and_authorizes_with_new_key(material):
         EXI().to_exi(auth.header.signature.signed_info, Namespace.XML_DSIG),
         ec.ECDSA(hashes.SHA512()),
     )
-    assert (material.path / KeyPath.CONTRACT_LEAF_PEM).stat().st_mode & 0o777 == 0o600
+    assert (material.path / KeyPath.CONTRACT_LEAF_PEM.value).stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.asyncio
@@ -541,9 +541,9 @@ async def test_storage_preserves_p256_support(material):
         keys[3].private_numbers().private_value.to_bytes(32, "big"),
     )
     key = load_priv_key(
-        str(material.path / KeyPath.CONTRACT_LEAF_PEM),
+        str(material.path / KeyPath.CONTRACT_LEAF_PEM.value),
         KeyEncoding.PEM,
-        str(material.path / KeyPasswordPath.CONTRACT_LEAF_KEY_PASSWORD),
+        str(material.path / KeyPasswordPath.CONTRACT_LEAF_KEY_PASSWORD.value),
     )
     matches = key.private_numbers() == keys[3].private_numbers()
     assert matches

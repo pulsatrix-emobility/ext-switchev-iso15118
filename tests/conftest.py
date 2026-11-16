@@ -8,7 +8,6 @@ from iso15118.evcc.controller.simulator import SimEVController
 from iso15118.evcc.everest import context as evcc_context
 from iso15118.secc.comm_session_handler import SECCCommunicationSession
 from iso15118.secc.controller.ev_data import EVSessionContext
-from iso15118.secc.controller.simulator import SimEVSEController
 from iso15118.secc.everest import context as secc_context
 from iso15118.secc.failed_responses import init_failed_responses_iso_v2
 from iso15118.shared.messages.enums import Protocol
@@ -42,6 +41,8 @@ def comm_evcc_session_mock():
 
 @pytest.fixture
 def comm_secc_session_mock():
+    from iso15118.secc.controller.simulator import SimEVSEController
+
     comm_session_mock = Mock(spec=SECCCommunicationSession)
     comm_session_mock.failed_responses_isov2 = init_failed_responses_iso_v2()
     comm_session_mock.session_id = MOCK_SESSION_ID

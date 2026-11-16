@@ -155,17 +155,17 @@ async def material(tmp_path, monkeypatch):
     )
     for folder in ("ca/v2g", "ca/mo", "ca/oem", "client/mo", "client/oem"):
         (tmp_path / folder).mkdir(parents=True, exist_ok=True)
-    (tmp_path / CertPath.V2G_ROOT_DER).write_bytes(der(cps[0]))
-    (tmp_path / CertPath.OEM_LEAF_DER).write_bytes(der(oem[3]))
+    (tmp_path / CertPath.V2G_ROOT_DER.value).write_bytes(der(cps[0]))
+    (tmp_path / CertPath.OEM_LEAF_DER.value).write_bytes(der(oem[3]))
     password = secrets.token_urlsafe(24).encode()
-    (tmp_path / KeyPath.OEM_LEAF_PEM).write_bytes(
+    (tmp_path / KeyPath.OEM_LEAF_PEM.value).write_bytes(
         oem_keys[3].private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.PKCS8,
             serialization.BestAvailableEncryption(password),
         )
     )
-    (tmp_path / KeyPasswordPath.OEM_LEAF_KEY_PASSWORD).write_bytes(password)
+    (tmp_path / KeyPasswordPath.OEM_LEAF_KEY_PASSWORD.value).write_bytes(password)
     controller = SimEVController(EVCCConfig())
     await controller.store_contract_cert_and_priv_key(
         cert_chain([*certs[:3], old]),
@@ -244,7 +244,7 @@ async def test_renewal_window_is_simulator_policy(material, hours, expected):
         material.now + timedelta(hours=hours),
         True,
     )
-    (material.path / CertPath.CONTRACT_LEAF_DER).write_bytes(der(cert))
+    (material.path / CertPath.CONTRACT_LEAF_DER.value).write_bytes(der(cert))
     assert await material.controller.is_cert_update_needed() is expected
 
 
@@ -253,7 +253,7 @@ async def test_explicit_install_and_missing_contract_prevent_update(material):
     material.controller.config.is_cert_install_needed = True
     assert not await material.controller.is_cert_update_needed()
     material.controller.config.is_cert_install_needed = False
-    (material.path / CertPath.CONTRACT_LEAF_DER).unlink()
+    (material.path / CertPath.CONTRACT_LEAF_DER.value).unlink()
     assert not await material.controller.is_cert_update_needed()
     assert await material.controller.is_cert_install_needed()
 
@@ -342,9 +342,9 @@ async def test_update_roundtrip_real_exi_and_v2gtp(material, change):
     assert state.next_state is PaymentDetails
     assert int.from_bytes(state.next_v2gtp_msg.to_bytes()[2:4], "big") == 0x8001
     key = load_priv_key(
-        str(material.path / KeyPath.CONTRACT_LEAF_PEM),
+        str(material.path / KeyPath.CONTRACT_LEAF_PEM.value),
         KeyEncoding.PEM,
-        str(material.path / KeyPasswordPath.CONTRACT_LEAF_KEY_PASSWORD),
+        str(material.path / KeyPasswordPath.CONTRACT_LEAF_KEY_PASSWORD.value),
     )
     matches = key.private_numbers() == material.keys[3].private_numbers()
     assert matches
@@ -416,7 +416,9 @@ async def test_reject_without_replacing_contract(material, change):
             res.header.signature.signed_info.reference[0]
         )
     elif change == "root":
-        (material.path / CertPath.V2G_ROOT_DER).write_bytes(der(material.certs[0]))
+        (material.path / CertPath.V2G_ROOT_DER.value).write_bytes(
+            der(material.certs[0])
+        )
     elif change in ("domain", "expired_cps"):
         subject = (
             material.cps[3].subject if change == "expired_cps" else material.old.subject
@@ -483,3 +485,30 @@ async def test_reject_invalid_cps_path_without_replacing_contract(material, chan
     assert state.next_state is Terminate
     unchanged = before == {p: p.read_bytes() for p in before}
     assert unchanged
+
+
+@pytest.mark.asyncio
+async def test_contract_storage_uses_enum_values_and_removes_stale_intermediate(
+    material,
+):
+    # Literal paths catch Python 3.11 pathlib stringifying str/Enum members by name.
+    files = (
+        "client/mo/MO_LEAF.der",
+        "client/mo/MO_LEAF.key",
+        "client/mo/MO_LEAF_PASSWORD.txt",
+        "ca/mo/MO_SUB_CA2.der",
+        "ca/mo/MO_SUB_CA1.der",
+    )
+    assert all((material.path / path).is_file() for path in files)
+    assert await material.controller.is_cert_update_needed()
+    replacement = cert_chain(material.certs)
+    replacement.sub_certificates.certificates = [der(material.certs[2])]
+    await material.controller.store_contract_cert_and_priv_key(
+        replacement,
+        material.keys[3].private_numbers().private_value.to_bytes(32, "big"),
+    )
+    assert not (material.path / "ca/mo/MO_SUB_CA1.der").exists()
+    assert all((material.path / path).is_file() for path in files[:-1])
+    assert not list(material.path.glob("CertPath.*"))
+    assert not list(material.path.glob("KeyPath.*"))
+    assert not list(material.path.glob("KeyPasswordPath.*"))
