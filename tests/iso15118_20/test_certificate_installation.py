@@ -547,3 +547,24 @@ async def test_storage_preserves_p256_support(material):
     )
     matches = key.private_numbers() == keys[3].private_numbers()
     assert matches
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_kind", ["initial", "resend"])
+async def test_installation_request_uses_common_message_v2gtp_header(
+    material, request_kind
+):
+    """iso15118-20:V2G20-2307: inspect the serialized header, without mocking send construction."""
+    comm = session(material)
+    state = AuthorizationSetup(comm)
+    await state.process_message(auth_setup())
+    initial_payload = state.next_v2gtp_msg.payload
+    if request_kind == "resend":
+        res = response(material)
+        res.evse_processing = "Ongoing"
+        state = CertificateInstallation(comm)
+        await state.process_message(res)
+    wire = state.next_v2gtp_msg.to_bytes()
+    assert int.from_bytes(wire[2:4], "big") == 0x8002
+    unchanged = state.next_v2gtp_msg.payload == initial_payload
+    assert unchanged

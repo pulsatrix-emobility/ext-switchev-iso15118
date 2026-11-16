@@ -331,6 +331,7 @@ class AuthorizationSetup(StateEVCC):
                     cert_install_req,
                     Timeouts.CERTIFICATE_INSTALLATION_REQ,
                     Namespace.ISO_V20_COMMON_MSG,
+                    ISOV20PayloadTypes.MAINSTREAM,
                 )
                 return
             except PrivateKeyReadError as exc:
@@ -456,6 +457,7 @@ class CertificateInstallation(StateEVCC):
                 self.comm_session.certificate_installation_request,
                 Timeouts.CERTIFICATE_INSTALLATION_REQ,
                 Namespace.ISO_V20_COMMON_MSG,
+                ISOV20PayloadTypes.MAINSTREAM,
             )
             return
         self.comm_session.ongoing_timer = -1
