@@ -28,6 +28,20 @@ class ExificientEXICodec(IEXICodec):
 
         self.exi_codec = self.gateway.jvm.com.siemens.ct.exi.main.cmd.EXICodec()
 
+        # The vendored codec omits Update from its -2 fragment list. This list
+        # selects both the MsgBody namespace and schema-informed fragment mode.
+        j = self.gateway.jvm
+        field = j.java.lang.Class.forName(
+            "com.siemens.ct.exi.main.cmd.AbstractEXICodec"
+        ).getField("fragmentGrammarElements_ISO15118_2")
+        names = list(field.get(None))
+        if "CertificateUpdateReq" not in names:
+            names.append("CertificateUpdateReq")
+            fragments = self.gateway.new_array(j.java.lang.String, len(names))
+            for index, name in enumerate(names):
+                fragments[index] = name
+            field.set(None, fragments)
+
     def encode(self, message: str, namespace: str) -> bytes:
         """
         Calls the Exificient EXI implmentation to encode input json.
