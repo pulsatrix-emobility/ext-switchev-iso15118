@@ -9,11 +9,17 @@ import logging
 import time
 from typing import Any, List, Union, cast
 import os
+from cryptography.x509 import ExtensionNotFound
 
 from iso15118.evcc import evcc_settings
 from iso15118.evcc.comm_session_handler import EVCCCommunicationSession
 from iso15118.evcc.states.evcc_state import StateEVCC
-from iso15118.shared.exceptions import PrivateKeyReadError
+from iso15118.shared.exceptions import (
+    CertChainLengthError,
+    DecryptionError,
+    EXIEncodingError,
+    PrivateKeyReadError,
+)
 from iso15118.shared.exi_codec import EXI
 from iso15118.shared.messages.app_protocol import (
     SupportedAppProtocolReq,
@@ -42,6 +48,7 @@ from iso15118.shared.messages.iso15118_20.common_messages import (
     AuthorizationSetupReq,
     AuthorizationSetupRes,
     CertificateInstallationReq,
+    CertificateInstallationRes,
     ChannelSelection,
     ChargingSession,
     EIMAuthReqParams,
@@ -99,6 +106,9 @@ from iso15118.shared.security import (
     KeyPasswordPath,
     KeyPath,
     create_signature,
+    decrypt_priv_key_iso20,
+    verify_signature,
+    load_cert,
     get_cert_issuer_serial,
     load_cert_chain,
     load_priv_key,
@@ -259,6 +269,7 @@ class AuthorizationSetup(StateEVCC):
             return
 
         auth_setup_res: AuthorizationSetupRes = cast(AuthorizationSetupRes, msg)
+        self.comm_session.authorization_setup_response = auth_setup_res
         signature = None
 
         if (
@@ -277,8 +288,6 @@ class AuthorizationSetup(StateEVCC):
                 id="id1",
             )
 
-            # TODO: Check how a signature in ISO 15118-20 differs from an
-            #       ISO 15118-2 signature
             try:
                 signature = create_signature(
                     [
@@ -294,6 +303,7 @@ class AuthorizationSetup(StateEVCC):
                         KeyEncoding.PEM,
                         os.path.join(get_PKI_PATH(), KeyPasswordPath.OEM_LEAF_KEY_PASSWORD),
                     ),
+                    iso20=True,
                 )
 
                 cert_install_req = CertificateInstallationReq(
@@ -314,11 +324,14 @@ class AuthorizationSetup(StateEVCC):
                     prioritized_emaids=await self.comm_session.ev_controller.get_prioritised_emaids(),  # noqa: E501
                 )
 
+                self.comm_session.certificate_installation_request = cert_install_req
+                self.comm_session.ongoing_timer = -1
                 self.create_next_message(
                     CertificateInstallation,
                     cert_install_req,
                     Timeouts.CERTIFICATE_INSTALLATION_REQ,
                     Namespace.ISO_V20_COMMON_MSG,
+                    ISOV20PayloadTypes.MAINSTREAM,
                 )
                 return
             except PrivateKeyReadError as exc:
@@ -328,6 +341,11 @@ class AuthorizationSetup(StateEVCC):
                     f"AuthorizationReq instead.\n{exc}"
                 )
 
+        await self.send_authorization(auth_setup_res)
+
+    async def send_authorization(self, auth_setup_res: AuthorizationSetupRes):
+        """Use the saved challenge with the contract currently in storage."""
+        signature = None
         eim_params, pnc_params = None, None
         if AuthEnum.PNC in auth_setup_res.auth_services:
             # TODO: Check if several contract certificates are in place and
@@ -339,7 +357,11 @@ class AuthorizationSetup(StateEVCC):
                     protocol=self.comm_session.protocol,
                     leaf_path=os.path.join(get_PKI_PATH(), CertPath.CONTRACT_LEAF_DER),
                     sub_ca2_path=os.path.join(get_PKI_PATH(), CertPath.MO_SUB_CA2_DER),
-                    sub_ca1_path=os.path.join(get_PKI_PATH(), CertPath.MO_SUB_CA1_DER),
+                    sub_ca1_path=(
+                        os.path.join(get_PKI_PATH(), CertPath.MO_SUB_CA1_DER)
+                        if os.path.isfile(os.path.join(get_PKI_PATH(), CertPath.MO_SUB_CA1_DER))
+                        else None
+                    ),
                 ),
                 id="id1",
             )
@@ -412,7 +434,79 @@ class CertificateInstallation(StateEVCC):
         ],
         message_exi: bytes = None,
     ):
-        raise NotImplementedError("CertificateInstallation not yet implemented")
+        res = self.check_msg_v20(message, CertificateInstallationRes)
+        if res is None:
+            return
+        # V2G20-1580: ignore dummy credential fields on warnings; stop safely.
+        if res.response_code != "OK":
+            self.stop_state_machine("Certificate installation rejected")
+            return
+        if res.evse_processing == Processing.ONGOING:
+            now = time.monotonic()
+            if self.comm_session.ongoing_timer < 0:
+                self.comm_session.ongoing_timer = now
+            if (
+                now - self.comm_session.ongoing_timer
+                > Timeouts.V2G_EVCC_ONGOING_TIMEOUT
+            ):
+                self.stop_state_machine("Certificate installation ongoing timeout")
+                return
+            # V2G20-1578: resend the unchanged signed request.
+            self.create_next_message(
+                CertificateInstallation,
+                self.comm_session.certificate_installation_request,
+                Timeouts.CERTIFICATE_INSTALLATION_REQ,
+                Namespace.ISO_V20_COMMON_MSG,
+                ISOV20PayloadTypes.MAINSTREAM,
+            )
+            return
+        self.comm_session.ongoing_timer = -1
+        data, chain = res.signed_installation_data, res.cps_certificate_chain
+        try:
+            if not verify_signature(
+                res.header.signature,
+                [(data.id, EXI().to_exi(data, Namespace.ISO_V20_COMMON_MSG))],
+                chain.certificate,
+                chain.sub_certificates.certificates if chain.sub_certificates else None,
+                load_cert(os.path.join(get_PKI_PATH(), CertPath.V2G_ROOT_DER)),
+                iso20=True,
+            ):
+                self.stop_state_machine(
+                    "Certificate installation CPS verification failed"
+                )
+                return
+            private = decrypt_priv_key_iso20(
+                data,
+                load_priv_key(
+                    os.path.join(get_PKI_PATH(), KeyPath.OEM_LEAF_PEM),
+                    KeyEncoding.PEM,
+                    os.path.join(get_PKI_PATH(), KeyPasswordPath.OEM_LEAF_KEY_PASSWORD),
+                ),
+                load_cert(os.path.join(get_PKI_PATH(), CertPath.OEM_LEAF_DER)),
+            )
+            await self.comm_session.ev_controller.store_contract_cert_and_priv_key(
+                data.contract_cert_chain,
+                private,
+            )
+        except (
+            DecryptionError,
+            PrivateKeyReadError,
+            CertChainLengthError,
+            ExtensionNotFound,
+            EXIEncodingError,
+            OSError,
+            ValueError,
+        ):
+            # Never include exception text: codec/crypto errors can contain credentials.
+            self.stop_state_machine(
+                "Certificate installation validation or storage failed"
+            )
+            return
+        # V2G20-1579/-1581: select this contract, decline any remaining contracts.
+        await AuthorizationSetup.send_authorization(
+            self,
+            self.comm_session.authorization_setup_response,
+        )
 
 
 class Authorization(StateEVCC):

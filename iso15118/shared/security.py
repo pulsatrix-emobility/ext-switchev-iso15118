@@ -9,7 +9,7 @@ from enum import Enum, auto
 from ssl import DER_cert_to_PEM_cert, SSLContext, SSLError, VerifyMode
 from typing import Dict, List, Optional, Tuple, Union, cast
 
-from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
+from cryptography.exceptions import InvalidSignature, InvalidTag, UnsupportedAlgorithm
 from cryptography.hazmat.backends.openssl.backend import Backend
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ec import (
@@ -23,6 +23,7 @@ from cryptography.hazmat.primitives.asymmetric.utils import (
     encode_dss_signature,
 )
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.hashes import SHA256, SHA512, Hash, HashAlgorithm
 from cryptography.hazmat.primitives.kdf.concatkdf import ConcatKDFHash
 from cryptography.hazmat.primitives.serialization import (
@@ -386,7 +387,6 @@ def to_ec_priv_key(private_key_bytes: bytes) -> EllipticCurvePrivateKey:
             "convert byets to EllipticCurvePublicKey instance"
         )
         raise exc
-
 
 
 def load_cert(cert_path: str) -> bytes:
@@ -889,6 +889,7 @@ def verify_signature(
     leaf_cert: bytes,
     sub_ca_certs: List[bytes] = None,
     root_ca_cert: bytes = None,
+    iso20: bool = False,
 ) -> bool:
     """
     Verifies the signature contained in the Signature element of the V2GMessage
@@ -932,10 +933,41 @@ def verify_signature(
     Returns:
         True, if the signature can be successfully verified, False otherwise.
     """
+    # V2G20-2473/-2475/-2648: enforce the profile before digest/signature work.
+    hash_algorithm = SHA512() if iso20 else SHA256()
+    width = 66 if iso20 else 32
+    if signature is None:
+        return False
+    if iso20:
+        canonical = "http://www.w3.org/TR/canonical-exi/"
+        info = signature.signed_info
+        expected = ["#" + identifier for identifier, _ in elements_to_sign]
+        if (
+            not expected
+            or len(set(expected)) != len(expected)
+            or [r.uri for r in info.reference] != expected
+            or info.canonicalization_method.algorithm != canonical
+            or info.signature_method.algorithm
+            != "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha512"
+            or any(
+                r.digest_method.algorithm != "http://www.w3.org/2001/04/xmlenc#sha512"
+                or [t.algorithm for t in r.transforms.transform] != [canonical]
+                for r in info.reference
+            )
+            or len(signature.signature_value.value) != 2 * width
+        ):
+            return False
+        try:
+            verify_cps_chain_iso20(leaf_cert, sub_ca_certs, root_ca_cert)
+        except (ValueError, TypeError, InvalidSignature, ExtensionNotFound):
+            return False
+
     # 1. Step: Digest value check for each reference element
     for id_attr, exi_encoded in elements_to_sign:
         logger.debug(f"Verifying digest for element with ID '{id_attr}'")
-        calculated_digest = create_digest(exi_encoded)
+        digest = Hash(hash_algorithm)
+        digest.update(exi_encoded)
+        calculated_digest = digest.finalize()
         message_digests_equal = False
 
         for reference in signature.signed_info.reference:
@@ -983,8 +1015,8 @@ def verify_signature(
     # coordinates in the Elliptic curve from where the public and private key
     # are extracted
 
-    ec_r = int.from_bytes(signature.signature_value.value[:32], "big")
-    ec_s = int.from_bytes(signature.signature_value.value[32:], "big")
+    ec_r = int.from_bytes(signature.signature_value.value[:width], "big")
+    ec_s = int.from_bytes(signature.signature_value.value[width:], "big")
     der_encoded_signature = encode_dss_signature(r=ec_r, s=ec_s)
 
     try:
@@ -992,12 +1024,14 @@ def verify_signature(
             pub_key.verify(
                 signature=der_encoded_signature,
                 data=exi_encoded_signed_info,
-                signature_algorithm=ec.ECDSA(SHA256()),
+                signature_algorithm=ec.ECDSA(hash_algorithm),
             )
         else:
             # TODO Add support for ISO 15118-20 public key types
             raise KeyTypeError(f"Unexpected public key type " f"{type(pub_key)}")
     except InvalidSignature as e:
+        if iso20:
+            return False
         pub_key_bytes = pub_key.public_bytes(
             encoding=Encoding.X962, format=PublicFormat.UncompressedPoint
         )
@@ -1010,6 +1044,8 @@ def verify_signature(
         return False
 
     # 3. Step: Verify signatures along the certificate chain, if provided
+    if iso20:
+        return True
     if sub_ca_certs and root_ca_cert:
         try:
             verify_certs(leaf_cert, sub_ca_certs, root_ca_cert)
@@ -1034,6 +1070,154 @@ def verify_signature(
 
     logger.debug("Signature verified successfully")
     return True
+
+
+def verify_cps_chain_iso20(leaf: bytes, intermediates: List[bytes], root: bytes):
+    """P-521 CPS path, without revocation: V2G20-1078, Amd.1 Tables B.3/B.7."""
+    if not root or not intermediates or len(intermediates) > 2:
+        raise ValueError("Missing CPS trust path")
+    certs = [load_der_x509_certificate(c) for c in [leaf, *intermediates, root]]
+    # Order intermediates by their mandated path length; the trust anchor is local.
+    certs[1:-1] = sorted(
+        certs[1:-1],
+        key=lambda c: c.extensions.get_extension_for_class(
+            extensions.BasicConstraints
+        ).value.path_length,
+    )
+    now = datetime.utcnow()
+    recognized = {
+        ExtensionOID.BASIC_CONSTRAINTS,
+        ExtensionOID.KEY_USAGE,
+        ExtensionOID.SUBJECT_KEY_IDENTIFIER,
+        ExtensionOID.AUTHORITY_KEY_IDENTIFIER,
+    }
+    for index, cert in enumerate(certs):
+        is_root, is_ca = index == len(certs) - 1, index > 0
+        key = cert.public_key()
+        if (
+            not isinstance(key, EllipticCurvePublicKey)
+            or not isinstance(key.curve, ec.SECP521R1)
+            or cert.signature_algorithm_oid.dotted_string != "1.2.840.10045.4.3.4"
+            or not cert.not_valid_before <= now <= cert.not_valid_after
+        ):
+            raise ValueError("Invalid CPS certificate algorithm or validity")
+        for oid in (NameOID.ORGANIZATION_NAME, NameOID.COMMON_NAME):
+            if not cert.subject.get_attributes_for_oid(oid):
+                raise ValueError("Missing CPS certificate subject")
+        domains = cert.subject.get_attributes_for_oid(NameOID.DOMAIN_COMPONENT)
+        if not is_root and any(d.value != "CPS" for d in domains):
+            raise ValueError("Invalid CPS domain")
+        if index == 0 and not cert.subject.get_attributes_for_oid(NameOID.COUNTRY_NAME):
+            raise ValueError("Missing CPS country")
+        bc = cert.extensions.get_extension_for_class(extensions.BasicConstraints)
+        ku = cert.extensions.get_extension_for_class(extensions.KeyUsage)
+        ski = cert.extensions.get_extension_for_class(extensions.SubjectKeyIdentifier)
+        expected_ski = extensions.SubjectKeyIdentifier.from_public_key(key).digest
+        short_ski = bytes([(expected_ski[-8] & 0x0F) | 0x40]) + expected_ski[-7:]
+        # Keep optional extensions optional, but reject forbidden or unhandled critical ones.
+        if (
+            ski.critical
+            or ski.value.digest not in (expected_ski, short_ski)
+            or not bc.critical
+            or bc.value.ca != is_ca
+            or bc.value.path_length != (index - 1 if is_ca and not is_root else None)
+            or not ku.critical
+            or ku.value.key_cert_sign != is_ca
+            or ku.value.data_encipherment
+            or (not is_root and ku.value.crl_sign)
+            or (
+                ku.value.key_agreement
+                and (ku.value.encipher_only or ku.value.decipher_only)
+            )
+            or (
+                not is_ca and (not ku.value.digital_signature or ku.value.key_agreement)
+            )
+            or any(e.critical and e.oid not in recognized for e in cert.extensions)
+            or any(e.oid == ExtensionOID.EXTENDED_KEY_USAGE for e in cert.extensions)
+        ):
+            raise ValueError("Invalid CPS certificate profile")
+        if not is_root:
+            issuer = certs[index + 1]
+            aki = cert.extensions.get_extension_for_class(
+                extensions.AuthorityKeyIdentifier
+            )
+            issuer_ski = issuer.extensions.get_extension_for_class(
+                extensions.SubjectKeyIdentifier
+            )
+            if (
+                cert.issuer != issuer.subject
+                or aki.critical
+                or aki.value.key_identifier != issuer_ski.value.digest
+                or aki.value.authority_cert_issuer is not None
+                or aki.value.authority_cert_serial_number is not None
+            ):
+                raise ValueError("Invalid CPS issuer")
+            issuer.public_key().verify(
+                cert.signature, cert.tbs_certificate_bytes, ec.ECDSA(SHA512())
+            )
+
+
+def decrypt_priv_key_iso20(
+    data, oem_key: EllipticCurvePrivateKey, oem_cert: bytes
+) -> bytes:
+    """V2G20-2535/-2505/-2678/-2507; Amd.1 V2G20-3388. No TPM/X448."""
+    try:
+        if (
+            data.ecdh_curve != "SECP521"
+            or data.secp521_encrypted_private_key is None
+            or data.tpm_encrypted_private_key is not None
+            or data.x448_encrypted_private_key is not None
+            or not isinstance(oem_key, EllipticCurvePrivateKey)
+            or not isinstance(oem_key.curve, ec.SECP521R1)
+            or len(data.dh_public_key) != 133
+            or data.dh_public_key[0] != 4
+        ):
+            raise ValueError("Unsupported installation key profile")
+        oem = load_der_x509_certificate(oem_cert)
+        if (
+            oem.public_key().public_numbers() != oem_key.public_key().public_numbers()
+            or not oem.extensions.get_extension_for_class(
+                extensions.KeyUsage
+            ).value.key_agreement
+        ):
+            raise ValueError("Invalid OEM key agreement credential")
+        pcid = get_cert_cn(oem_cert).replace("-", "").upper()
+        if len(pcid) != 18 or not pcid.isascii() or not pcid.isalnum():
+            raise ValueError("Invalid provisioning identity")
+        contract = load_der_x509_certificate(data.contract_cert_chain.certificate)
+        ski = contract.extensions.get_extension_for_class(
+            extensions.SubjectKeyIdentifier
+        ).value.digest
+        if len(ski) not in (8, 20):
+            raise ValueError("Invalid contract key identifier")
+        aad = (pcid + ski.hex().upper()).encode("ascii")
+        public = EllipticCurvePublicKey.from_encoded_point(
+            ec.SECP521R1(), data.dh_public_key
+        )
+        secret = oem_key.exchange(ec.ECDH(), public)
+        key = ConcatKDFHash(algorithm=SHA512(), length=32, otherinfo=b"\x01UV").derive(
+            secret
+        )
+        encrypted = data.secp521_encrypted_private_key
+        if len(encrypted) != 94:
+            raise ValueError("Invalid encrypted key length")
+        scalar = AESGCM(key).decrypt(encrypted[:12], encrypted[12:], aad)
+        order = int(
+            "1fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa51868783bf2f966b7fcc0148f709a5d03bb5c9b8899c47aebb6fb71e91386409",
+            16,
+        )
+        value = int.from_bytes(scalar, "big")
+        if scalar[0] & 0xFE or not 0 < value < order:
+            raise ValueError("Invalid contract key scalar")
+        private = derive_private_key(value, ec.SECP521R1())
+        if (
+            private.public_key().public_numbers()
+            != contract.public_key().public_numbers()
+        ):
+            raise ValueError("Contract key mismatch")
+        return scalar
+    except (ValueError, TypeError, InvalidTag, ExtensionNotFound) as exc:
+        raise DecryptionError("Invalid certificate installation key data") from exc
 
 
 def create_digest(exi_encoded_element) -> bytes:

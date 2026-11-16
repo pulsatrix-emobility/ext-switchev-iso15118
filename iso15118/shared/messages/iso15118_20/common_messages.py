@@ -1146,6 +1146,9 @@ class SignedInstallationData(BaseModel):
         None, min_length=209, max_length=209, alias="TPM_EncryptedPrivateKey"
     )
 
+    def __str__(self):
+        return "SignedInstallationData"
+
     @root_validator(pre=True)
     def one_encryption_mode(cls, values):
         """
