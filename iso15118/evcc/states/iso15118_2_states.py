@@ -16,6 +16,7 @@ from iso15118.shared.exceptions import (
     DecryptionError,
     PrivateKeyReadError,
     CertChainLengthError,
+    EXIEncodingError,
 )
 from iso15118.shared.exi_codec import EXI
 from iso15118.shared.messages.app_protocol import (
@@ -48,6 +49,8 @@ from iso15118.shared.messages.iso15118_2.body import (
     CableCheckRes,
     CertificateInstallationReq,
     CertificateInstallationRes,
+    CertificateUpdateReq,
+    CertificateUpdateRes,
     ChargeParameterDiscoveryReq,
     ChargeParameterDiscoveryRes,
     ChargingStatusReq,
@@ -333,7 +336,10 @@ class ServiceDiscovery(StateEVCC):
                 service.service_category == ServiceCategory.CERTIFICATE
                 and self.comm_session.selected_auth_option
                 and self.comm_session.selected_auth_option == AuthEnum.PNC_V2
-                and await self.comm_session.ev_controller.is_cert_install_needed()
+                and (
+                    await self.comm_session.ev_controller.is_cert_install_needed()
+                    or await self.comm_session.ev_controller.is_cert_update_needed()
+                )
             ):
                 if not self.comm_session.is_tls:
                     return
@@ -368,7 +374,6 @@ class ServiceDiscovery(StateEVCC):
                     self.comm_session.selected_services.append(
                         SelectedService(service_id=service.service_id)
                     )
-
 
         logger.debug(f"Offered value-added services: {offered_services}")
 
@@ -412,15 +417,21 @@ class ServiceDetail(StateEVCC):
         if (
             service_detail_res.service_id == ServiceID.CERTIFICATE
             and service_detail_res.service_parameter_list is not None
-            and await self.comm_session.ev_controller.is_cert_install_needed()
-            and any(
-                parameter_set.parameter_set_id == 1
-                for parameter_set in service_detail_res.service_parameter_list.parameter_set
-            )
         ):
-            self.comm_session.selected_services.append(
-                SelectedService(service_id=ServiceID.CERTIFICATE, parameter_set_id=1)
-            )
+            parameter_id = None
+            if await self.comm_session.ev_controller.is_cert_install_needed():
+                parameter_id = 1
+            elif await self.comm_session.ev_controller.is_cert_update_needed():
+                parameter_id = 2
+            if any(
+                p.parameter_set_id == parameter_id
+                for p in service_detail_res.service_parameter_list.parameter_set
+            ):
+                self.comm_session.selected_services.append(
+                    SelectedService(
+                        service_id=ServiceID.CERTIFICATE, parameter_set_id=parameter_id
+                    )
+                )
 
         if len(self.comm_session.service_details_to_request) == 0:
             payment_service_selection_req = PaymentServiceSelectionReq(
@@ -527,6 +538,16 @@ class PaymentServiceSelection(StateEVCC):
                         f"CertificateInstallationReq: {exc}"
                     )
                     return
+            elif (
+                not await self.comm_session.ev_controller.is_cert_install_needed()
+                and self.comm_session.is_tls
+                and await self.comm_session.ev_controller.is_cert_update_needed()
+                and any(
+                    s.service_id == ServiceID.CERTIFICATE and s.parameter_set_id == 2
+                    for s in self.comm_session.selected_services
+                )
+            ):
+                await CertificateUpdate(self.comm_session).send_request()
             else:
                 try:
                     payment_details_req = PaymentDetailsReq(
@@ -670,6 +691,130 @@ class CertificateInstallation(StateEVCC):
             Timeouts.PAYMENT_DETAILS_REQ,
             Namespace.ISO_V2_MSG_DEF,
         )
+
+
+class CertificateUpdate(StateEVCC):
+    """Renew using the installed contract key; V2G2-888/-891/-928."""
+
+    def __init__(self, comm_session: EVCCCommunicationSession):
+        super().__init__(comm_session, Timeouts.CERTIFICATE_UPDATE_REQ)
+        self.retry_counter = None
+
+    async def send_request(self):
+        try:
+            issuer, serial = get_cert_issuer_serial(
+                os.path.join(get_PKI_PATH(), CertPath.V2G_ROOT_DER)
+            )
+            sub_ca1_path = os.path.join(get_PKI_PATH(), CertPath.MO_SUB_CA1_DER)
+            chain = load_cert_chain(
+                Protocol.ISO_15118_2,
+                os.path.join(get_PKI_PATH(), CertPath.CONTRACT_LEAF_DER),
+                os.path.join(get_PKI_PATH(), CertPath.MO_SUB_CA2_DER),
+                sub_ca1_path if os.path.isfile(sub_ca1_path) else None,
+            )
+            request = CertificateUpdateReq(
+                id="update",
+                contract_cert_chain=chain,
+                emaid=get_cert_cn(chain.certificate),
+                list_of_root_cert_ids=RootCertificateIDList(
+                    x509_issuer_serials=[
+                        X509IssuerSerial(
+                            x509_issuer_name=issuer, x509_serial_number=serial
+                        )
+                    ]
+                ),
+            )
+            signature = create_signature(
+                [(request.id, EXI().to_exi(request, Namespace.ISO_V2_MSG_DEF))],
+                load_priv_key(
+                    os.path.join(get_PKI_PATH(), KeyPath.CONTRACT_LEAF_PEM),
+                    KeyEncoding.PEM,
+                    os.path.join(
+                        get_PKI_PATH(), KeyPasswordPath.CONTRACT_LEAF_KEY_PASSWORD
+                    ),
+                ),
+            )
+            self.create_next_message(
+                CertificateUpdate,
+                request,
+                Timeouts.CERTIFICATE_UPDATE_REQ,
+                Namespace.ISO_V2_MSG_DEF,
+                signature=signature,
+            )
+        except (OSError, ValueError, PrivateKeyReadError, EXIEncodingError):
+            self.stop_state_machine("Cannot build certificate update request")
+
+    async def process_message(self, message, message_exi: bytes = None):
+        # Failures are unsigned; retain RetryCounter before the common failure guard stops.
+        if (
+            isinstance(message, V2GMessageV2)
+            and message.header.session_id == self.comm_session.session_id
+        ):
+            res = message.body.certificate_update_res
+            if res is not None and res.response_code.startswith("FAILED"):
+                self.retry_counter = res.retry_counter
+        msg = self.check_msg_v2(message, CertificateUpdateRes)
+        if msg is None:
+            return
+        res = msg.body.certificate_update_res
+        try:
+            elements = [
+                res.contract_cert_chain,
+                res.encrypted_private_key,
+                res.dh_public_key,
+                res.emaid,
+            ]
+            if not verify_signature(
+                msg.header.signature,
+                [
+                    (element.id, EXI().to_exi(element, Namespace.ISO_V2_MSG_DEF))
+                    for element in elements
+                ],
+                res.cps_cert_chain.certificate,
+                (
+                    res.cps_cert_chain.sub_certificates.certificates
+                    if res.cps_cert_chain.sub_certificates
+                    else None
+                ),
+                load_cert(os.path.join(get_PKI_PATH(), CertPath.V2G_ROOT_DER)),
+                strict_cps=True,
+            ):
+                self.stop_state_machine("Certificate update CPS verification failed")
+                return
+            if res.emaid.value != get_cert_cn(res.contract_cert_chain.certificate):
+                raise ValueError("Contract identity mismatch")
+            private = decrypt_priv_key(
+                res.encrypted_private_key.value,
+                load_priv_key(
+                    os.path.join(get_PKI_PATH(), KeyPath.CONTRACT_LEAF_PEM),
+                    KeyEncoding.PEM,
+                    os.path.join(
+                        get_PKI_PATH(), KeyPasswordPath.CONTRACT_LEAF_KEY_PASSWORD
+                    ),
+                ),
+                to_ec_pub_key(res.dh_public_key.value),
+            )
+            await self.comm_session.ev_controller.store_contract_cert_and_priv_key(
+                res.contract_cert_chain, private
+            )
+            self.create_next_message(
+                PaymentDetails,
+                PaymentDetailsReq(
+                    emaid=res.emaid.value, cert_chain=res.contract_cert_chain
+                ),
+                Timeouts.PAYMENT_DETAILS_REQ,
+                Namespace.ISO_V2_MSG_DEF,
+            )
+        except (
+            OSError,
+            ValueError,
+            TypeError,
+            PrivateKeyReadError,
+            DecryptionError,
+            CertChainLengthError,
+            EXIEncodingError,
+        ):
+            self.stop_state_machine("Certificate update validation or storage failed")
 
 
 class PaymentDetails(StateEVCC):
