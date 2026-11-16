@@ -220,6 +220,8 @@ def response(material, change=None):
         response.dh_public_key,
         response.emaid,
     ]
+    if change == "reordered":
+        elements.reverse()
     signature = create_signature(
         [(v.id, EXI().to_exi(v, NS)) for v in elements], material.cps_keys[3]
     )
@@ -305,7 +307,8 @@ async def test_discovery_and_parameter_selection(material, install, offered, sel
 
 
 @pytest.mark.asyncio
-async def test_update_roundtrip_real_exi_and_v2gtp(material):
+@pytest.mark.parametrize("change", [None, "reordered"])
+async def test_update_roundtrip_real_exi_and_v2gtp(material, change):
     comm = session(material)
     await PaymentServiceSelection(comm).process_message(
         message(
@@ -334,7 +337,7 @@ async def test_update_roundtrip_real_exi_and_v2gtp(material):
         ec.ECDSA(hashes.SHA256()),
     )
     await state.process_message(
-        EXI().from_exi(EXI().to_exi(response(material), NS), NS)
+        EXI().from_exi(EXI().to_exi(response(material, change), NS), NS)
     )
     assert state.next_state is PaymentDetails
     assert int.from_bytes(state.next_v2gtp_msg.to_bytes()[2:4], "big") == 0x8001
@@ -386,6 +389,7 @@ async def test_request_gates(material, install, tls, parameter, expected):
         "bad_signature",
         "missing_chain",
         "extra_reference",
+        "duplicate_reference",
         "wrong_key",
         "root",
         "domain",
@@ -405,6 +409,10 @@ async def test_reject_without_replacing_contract(material, change):
         res.body.certificate_update_res.cps_cert_chain.sub_certificates = None
     elif change == "extra_reference":
         res.header.signature.signed_info.reference.append(
+            res.header.signature.signed_info.reference[0]
+        )
+    elif change == "duplicate_reference":
+        res.header.signature.signed_info.reference[1] = (
             res.header.signature.signed_info.reference[0]
         )
     elif change == "root":
@@ -435,3 +443,43 @@ async def test_reject_without_replacing_contract(material, change):
     assert unchanged
     if change == "failed":
         assert state.retry_counter == -1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["critical", "foreign_signer", "authority"])
+async def test_reject_invalid_cps_path_without_replacing_contract(material, change):
+    # Keep the issuer name, public key, and (except in the AKI case) identifiers.
+    # The foreign signature must fail even when all names and identifiers match.
+    index = 2 if change == "foreign_signer" else 3
+    original = material.cps[index]
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(original.subject)
+        .issuer_name(original.issuer)
+        .public_key(original.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(original.not_valid_before)
+        .not_valid_after(original.not_valid_after)
+    )
+    for ext in original.extensions:
+        value = ext.value
+        if change == "authority" and isinstance(value, x509.AuthorityKeyIdentifier):
+            value = x509.AuthorityKeyIdentifier(bytes(20), None, None)
+        builder = builder.add_extension(value, ext.critical)
+    if change == "critical":
+        builder = builder.add_extension(
+            x509.UnrecognizedExtension(x509.ObjectIdentifier("1.2.3.4"), b"\x05\x00"),
+            True,
+        )
+    signer = (
+        ec.generate_private_key(ec.SECP256R1())
+        if change == "foreign_signer"
+        else material.cps_keys[index - 1]
+    )
+    material.cps[index] = builder.sign(signer, hashes.SHA256())
+    state = CertificateUpdate(session(material))
+    before = {p: p.read_bytes() for p in (material.path / "client/mo").iterdir()}
+    await state.process_message(response(material))
+    assert state.next_state is Terminate
+    unchanged = before == {p: p.read_bytes() for p in before}
+    assert unchanged

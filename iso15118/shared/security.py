@@ -947,7 +947,8 @@ def verify_signature(
         if (
             not expected
             or len(set(expected)) != len(expected)
-            or [r.uri for r in info.reference] != expected
+            or len(info.reference) != len(expected)
+            or {r.uri for r in info.reference} != set(expected)
             or info.canonicalization_method.algorithm != canonical
             or info.signature_method.algorithm
             != f"http://www.w3.org/2001/04/xmldsig-more#ecdsa-{hash_name}"
@@ -977,6 +978,18 @@ def verify_signature(
                     )
                 ] != ["CPS"]:
                     return False
+                certs[1:-1] = sorted(
+                    certs[1:-1],
+                    key=lambda c: c.extensions.get_extension_for_class(
+                        extensions.BasicConstraints
+                    ).value.path_length,
+                )
+                recognized = {
+                    ExtensionOID.BASIC_CONSTRAINTS,
+                    ExtensionOID.KEY_USAGE,
+                    ExtensionOID.SUBJECT_KEY_IDENTIFIER,
+                    ExtensionOID.AUTHORITY_KEY_IDENTIFIER,
+                }
                 check_validity(certs)
                 for index, cert in enumerate(certs):
                     public = cert.public_key()
@@ -993,14 +1006,25 @@ def verify_signature(
                         or constraints.ca != (index > 0)
                         or usage.key_cert_sign != (index > 0)
                         or (index == 0 and not usage.digital_signature)
-                        or (
-                            index < len(certs) - 1
-                            and not any(
-                                cert.issuer == issuer.subject for issuer in certs[1:]
-                            )
+                        or any(
+                            e.critical and e.oid not in recognized
+                            for e in cert.extensions
                         )
                     ):
                         return False
+                # Validate each ordered issuer link, including its key identifier.
+                for cert, issuer in zip(certs, certs[1:]):
+                    aki = cert.extensions.get_extension_for_class(
+                        extensions.AuthorityKeyIdentifier
+                    ).value.key_identifier
+                    ski = issuer.extensions.get_extension_for_class(
+                        extensions.SubjectKeyIdentifier
+                    ).value.digest
+                    if cert.issuer != issuer.subject or aki != ski:
+                        return False
+                    issuer.public_key().verify(
+                        cert.signature, cert.tbs_certificate_bytes, ec.ECDSA(SHA256())
+                    )
         except (
             ValueError,
             TypeError,

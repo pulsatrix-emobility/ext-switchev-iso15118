@@ -568,3 +568,18 @@ async def test_installation_request_uses_common_message_v2gtp_header(
     assert int.from_bytes(wire[2:4], "big") == 0x8002
     unchanged = state.next_v2gtp_msg.payload == initial_payload
     assert unchanged
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_signature_reference_order_and_uniqueness(material, duplicate):
+    elements = [("first", b"first element"), ("second", b"second element")]
+    signed = [elements[1], elements[1] if duplicate else elements[0]]
+    signature = create_signature(signed, material.cps_keys[3], iso20=True)
+    assert verify_signature(
+        signature,
+        elements,
+        der(material.cps[3]),
+        [der(material.cps[2]), der(material.cps[1])],
+        der(material.cps[0]),
+        iso20=True,
+    ) is (not duplicate)
