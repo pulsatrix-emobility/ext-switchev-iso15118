@@ -437,7 +437,10 @@ async def test_failed_install_never_stores_or_continues(material, kind):
 
 
 @pytest.mark.asyncio
-async def test_ongoing_resends_unchanged_request_and_times_out(material, monkeypatch):
+@pytest.mark.parametrize("clock_base", [10.0, 10000.0])
+async def test_ongoing_resends_unchanged_request_and_times_out(
+    material, monkeypatch, clock_base
+):
     comm = session(material)
     setup = AuthorizationSetup(comm)
     setup.create_next_message = Mock()
@@ -447,13 +450,20 @@ async def test_ongoing_resends_unchanged_request_and_times_out(material, monkeyp
     res.header.signature = None
     state = CertificateInstallation(comm)
     state.create_next_message = Mock()
+    monkeypatch.setattr(
+        "iso15118.evcc.states.iso15118_20_states.time",
+        SimpleNamespace(monotonic=lambda: clock_base),
+    )
     await state.process_message(res)
     assert (
         state.create_next_message.call_args.args[1]
         is comm.certificate_installation_request
     )
-    comm.ongoing_timer -= 61
+    started = comm.ongoing_timer
+    # Advance the clock, not the saved timestamp: negative values mean inactive.
+    clock_base += 61
     await state.process_message(res)
+    assert comm.ongoing_timer == started
     assert state.next_state is Terminate
 
 
